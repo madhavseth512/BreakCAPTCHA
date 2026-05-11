@@ -1,0 +1,11 @@
+venv/
+data/dataset/
+data/processed/
+model/saved_model/
+export/tfjs_model/
+extension/tfjs_model/
+extension/lib/tf.min.js
+__pycache__/
+*.pyc
+.env
+*.h5

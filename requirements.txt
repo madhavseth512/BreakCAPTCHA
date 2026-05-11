@@ -1,0 +1,9 @@
+# Python 3.11 — pinned for mutual compatibility, CPU training only
+# tensorflowjs excluded — install separately in Phase 4 (model export)
+
+captcha==0.6.0
+opencv-python==4.8.1.78
+numpy==1.26.4
+tensorflow==2.15.0
+matplotlib==3.8.4
+scikit-learn==1.4.2
