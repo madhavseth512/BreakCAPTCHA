@@ -18,8 +18,8 @@ Raw CAPTCHA image (200x80 px)
         ▼
 [ OpenCV Preprocessing ]
   Grayscale → Otsu threshold → Morphological close
-  → Contour detection → Wide-contour splitting
-  → Sort left-to-right → Crop & resize to 28x28
+  → Vertical projection → Find 3 valley columns
+  → Split into 4 strips → Crop & resize to 28x28
         │
         ▼ (4 character images, 28x28x1)
 [ CNN Classifier ]
@@ -122,7 +122,7 @@ Options:
 --output  Processed data output   (default: data/processed)
 ```
 
-Check the skip rate in the output. Above 10% indicates a segmentation issue that should be tuned before training.
+Segmentation uses vertical projection — skip rate should be ~0% on synthetic data.
 
 ---
 
@@ -181,7 +181,11 @@ Converts `captcha_model.h5` to TensorFlow.js LayersModel format and copies the o
 
 ### Preprocessing
 
-Each CAPTCHA image is converted to grayscale and binarized using Otsu's method with `THRESH_BINARY_INV`, producing white characters on a black background. A morphological close operation removes noise. External contours are extracted and filtered to remove specks. Contours that are too wide (likely two merged characters) are split vertically. The remaining contours are sorted left-to-right and each is cropped, resized to 28×28, and normalized to [0, 1].
+Each CAPTCHA image is converted to grayscale and binarized using Otsu's method with `THRESH_BINARY_INV`, producing white characters on a black background. A morphological close operation removes noise.
+
+Character segmentation uses **vertical projection**: white pixel values are summed along every column to produce a 1D density profile. The 3 columns with the lowest pixel density — the natural gaps between characters — are found near the expected boundaries (25%, 50%, 75% of image width, ±20px search window). These become the split points, dividing the image into 4 strips. Each strip is resized to 28×28 and normalized to [0, 1].
+
+This approach was chosen over contour-based segmentation because the `captcha` library renders noise curves that bridge characters together, merging all 4 letters into a single connected component. Projection segmentation is immune to this — it works directly on pixel density regardless of connectivity.
 
 The same pipeline is re-implemented in JavaScript (`preprocessing.js`) for browser-side use, matching the Python output without requiring OpenCV.js.
 

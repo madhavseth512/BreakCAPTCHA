@@ -2,22 +2,39 @@
 Contour utility functions for the CAPTCHA preprocessing pipeline.
 """
 
+import cv2
 import numpy as np
 
 
-def get_bounding_rects(contours):
-    """Extract and filter bounding rectangles from contours.
+def get_bounding_rects(contours, top_n=8):
+    """Extract bounding rectangles from the largest contours by actual pixel area.
 
-    Filters out noise (very small blobs) that aren't character-sized.
-    Returns list of (x, y, w, h) tuples.
+    Uses cv2.contourArea() (actual filled area) rather than bounding rect
+    dimensions. Noise curves from the captcha library can span the full image
+    width but are thin lines — their actual area is tiny. Character blobs are
+    large and filled, so they consistently rank in the top N.
+
+    Args:
+        contours: raw contours from cv2.findContours
+        top_n:    how many largest candidates to keep before split logic (default 8,
+                  since up to 4 merged pairs could exist before splitting)
+
+    Returns:
+        list of (x, y, w, h) tuples for the top_n largest contours by area
     """
-    import cv2
-    rects = []
+    candidates = []
     for contour in contours:
+        area = cv2.contourArea(contour)
+        if area < 50:           # discard specks too small to be any part of a character
+            continue
         x, y, w, h = cv2.boundingRect(contour)
-        if w >= 5 and h >= 15:
-            rects.append((x, y, w, h))
-    return rects
+        candidates.append((area, x, y, w, h))
+
+    # Keep only the largest N blobs — characters always dominate by area
+    candidates.sort(key=lambda c: c[0], reverse=True)
+    candidates = candidates[:top_n]
+
+    return [(x, y, w, h) for (_, x, y, w, h) in candidates]
 
 
 def split_wide_rects(rects):

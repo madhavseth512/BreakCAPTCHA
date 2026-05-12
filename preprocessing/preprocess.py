@@ -6,9 +6,15 @@ Pipeline steps:
   2. Grayscale conversion
   3. Otsu binary thresholding (THRESH_BINARY_INV) — letters become white on black
   4. Morphological close — fill small gaps, remove noise
-  5. Contour detection (external only)
-  6. Filter tiny blobs, split wide contours, sort left-to-right
-  7. Crop each character, resize to 28x28, normalize to [0, 1]
+  5. Vertical projection segmentation — find 3 valley columns to split into 4 chars
+  6. Crop each character strip, resize to 28x28, normalize to [0, 1]
+
+Note on segmentation approach:
+  Contour-based segmentation fails on captcha-library output because all 4
+  characters merge into a single connected component (noise curves bridge them).
+  Vertical projection finds the 3 columns with lowest white-pixel density —
+  the natural gaps between characters — and uses those as split boundaries.
+  This gives near-zero skip rate on uniformly generated synthetic CAPTCHAs.
 
 Usage (CLI):
     python -m preprocessing.preprocess
@@ -20,10 +26,9 @@ import argparse
 import cv2
 import numpy as np
 
-from preprocessing.helpers import get_bounding_rects, split_wide_rects, sort_left_to_right
-
 TARGET_SIZE = (28, 28)
 CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+N_CHARS = 4
 
 
 class CaptchaPreprocessor:
@@ -37,7 +42,7 @@ class CaptchaPreprocessor:
 
     def binarize(self, gray):
         # THRESH_BINARY_INV: dark letters → white (255), light background → black (0)
-        # THRESH_OTSU: auto-select threshold from histogram — no hardcoded value
+        # THRESH_OTSU: auto-select threshold from histogram — no hardcoded value needed
         _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
         return binary
 
@@ -46,25 +51,51 @@ class CaptchaPreprocessor:
         kernel = np.ones((2, 2), np.uint8)
         return cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
 
-    def find_rects(self, binary):
-        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        rects = get_bounding_rects(contours)
-        rects = split_wide_rects(rects)
-        rects = sort_left_to_right(rects)
+    def segment_by_projection(self, binary):
+        """Split the binary image into N_CHARS strips using vertical projection.
+
+        Sums white pixel values along each column to build a 1D profile.
+        The 3 natural gaps between the 4 characters are the lowest-density
+        columns. We search for each split near the expected position (at 25%,
+        50%, 75% of image width) within a ±20px window so small shifts in
+        character placement are handled correctly.
+
+        Returns a list of N_CHARS (x, y, w, h) bounding rects, one per character.
+        """
+        h, w = binary.shape
+        col_sums = binary.sum(axis=0).astype(float)
+
+        search_range = 20
+        split_xs = []
+        for i in range(1, N_CHARS):
+            center = int(w * i / N_CHARS)
+            lo = max(0, center - search_range)
+            hi = min(w, center + search_range)
+            # argmin gives the column with fewest white pixels — the inter-char gap
+            split_x = lo + int(np.argmin(col_sums[lo:hi]))
+            split_xs.append(split_x)
+
+        boundaries = [0] + split_xs + [w]
+        rects = []
+        for i in range(N_CHARS):
+            x1, x2 = boundaries[i], boundaries[i + 1]
+            rects.append((x1, 0, x2 - x1, h))
+
         return rects
 
     def extract_characters(self, binary, rects):
         """Crop each rect, resize to 28x28, normalize to float [0, 1]."""
         chars = []
-        h_img, w_img = binary.shape
+        img_h, img_w = binary.shape
         for (x, y, w, h) in rects:
-            pad = 2
-            x1 = max(0, x - pad)
-            y1 = max(0, y - pad)
-            x2 = min(w_img, x + w + pad)
-            y2 = min(h_img, y + h + pad)
+            x1 = max(0, x)
+            y1 = max(0, y)
+            x2 = min(img_w, x + w)
+            y2 = min(img_h, y + h)
 
             crop = binary[y1:y2, x1:x2]
+            if crop.size == 0:
+                return None
             crop = cv2.resize(crop, TARGET_SIZE, interpolation=cv2.INTER_AREA)
             crop = crop.astype("float32") / 255.0
             crop = np.expand_dims(crop, axis=-1)   # (28, 28, 1)
@@ -72,16 +103,14 @@ class CaptchaPreprocessor:
         return chars
 
     def process(self, image_path):
-        """Full pipeline for one image. Returns list of 4 character arrays, or None on failure."""
+        """Full pipeline for one image. Returns list of 4 character arrays, or None."""
         image = self.load_image(image_path)
         if image is None:
             return None
         gray = self.to_grayscale(image)
         binary = self.binarize(gray)
         binary = self.denoise(binary)
-        rects = self.find_rects(binary)
-        if len(rects) != 4:
-            return None
+        rects = self.segment_by_projection(binary)
         return self.extract_characters(binary, rects)
 
 
@@ -136,7 +165,7 @@ def prepare_dataset(image_dir, output_dir):
 
     print(f"\nResults:")
     print(f"  Total images      : {total_files}")
-    print(f"  Skipped (bad seg) : {skipped}  ({skipped/total_files*100:.1f}%)")
+    print(f"  Skipped (bad seg) : {skipped}  ({skipped / total_files * 100:.1f}%)")
     print(f"  Character samples : {len(X)}")
     print(f"  Unique classes    : {len(set(y))}")
     print(f"\nSaved to '{output_dir}/'  (X.npy, y.npy)")
