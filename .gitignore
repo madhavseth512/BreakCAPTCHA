@@ -9,3 +9,4 @@ __pycache__/
 *.pyc
 .env
 *.h5
+deprecated/*.npy
