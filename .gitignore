@@ -9,4 +9,5 @@ __pycache__/
 *.pyc
 .env
 *.h5
-deprecated/*.npy
+# Local archive of superseded runs/architecture — never pushed to the remote.
+deprecated/

@@ -6,7 +6,7 @@ A CNN-based CAPTCHA solver that generates synthetic training data, preprocesses 
 
 ## Overview
 
-BreakCAPTCHA targets standard 4-character alphanumeric CAPTCHAs (A–Z, 0–9). It treats CAPTCHA solving as a per-character classification problem: the image is segmented into individual characters using contour detection, each character is classified by a CNN, and the results are concatenated to produce the full prediction. The trained model is exported to TensorFlow.js and bundled inside a Chrome extension that auto-detects and solves CAPTCHAs on any webpage.
+BreakCAPTCHA targets standard 4-character alphanumeric CAPTCHAs (A–Z, 0–9). It treats CAPTCHA solving as a sequence recognition problem: the full image is fed to a CRNN (convolutional layers followed by bidirectional LSTMs) and trained end-to-end with CTC loss, which aligns the model's per-column output to the 4-character label without any explicit segmentation. The trained model is exported to TensorFlow.js and bundled inside a Chrome extension that auto-detects and solves CAPTCHAs on any webpage.
 
 ---
 
@@ -16,16 +16,17 @@ BreakCAPTCHA targets standard 4-character alphanumeric CAPTCHAs (A–Z, 0–9). 
 Raw CAPTCHA image (200x80 px)
         │
         ▼
-[ OpenCV Preprocessing ]
-  Grayscale → Otsu threshold → Morphological close
-  → Vertical projection → Find 3 valley columns
-  → Split into 4 strips → Crop & resize to 28x28
+[ Preprocessing ]
+  Resize to 32x200 → Grayscale → Normalize to [0,1]
+  (no thresholding — the network sees the full grayscale image)
         │
-        ▼ (4 character images, 28x28x1)
-[ CNN Classifier ]
-  Conv2D(32) → BatchNorm → ReLU → MaxPool
-  Conv2D(64) → BatchNorm → ReLU → MaxPool
-  Flatten → Dense(128) → Dropout(0.4) → Dense(36, softmax)
+        ▼ (1 image, 32x200x1)
+[ CRNN + CTC ]
+  Conv(64) → Conv(128) → Conv(256) → Conv(256)   (pool height, keep width)
+  → Reshape to 50 timesteps × 512 features
+  → BiLSTM(128) → BiLSTM(128)
+  → Dense(37, softmax)   (36 classes + 1 CTC blank)
+  → Greedy CTC decode
         │
         ▼
 [ Predicted text ] → Auto-filled into CAPTCHA input field
@@ -41,10 +42,9 @@ BreakCAPTCHA/
 │   ├── generate_captchas.py      # Phase 1: synthetic CAPTCHA generator
 │   └── dataset/                  # Generated images (gitignored)
 ├── preprocessing/
-│   ├── preprocess.py             # Phase 2: OpenCV preprocessing pipeline
-│   └── helpers.py                # Contour utilities
+│   └── preprocess.py             # Phase 2: resize / grayscale / normalize pipeline
 ├── model/
-│   ├── model_architecture.py     # CNN definition
+│   ├── model_architecture.py     # CRNN definition
 │   ├── train.py                  # Phase 3: training script
 │   └── evaluate.py               # Evaluation and metrics
 ├── export/
@@ -114,15 +114,13 @@ Options:
 python -m preprocessing.preprocess
 ```
 
-Runs the full OpenCV pipeline on every image — grayscale, Otsu threshold, morphological close, contour detection, wide-contour splitting — and saves character crops as NumPy arrays to `data/processed/`.
+Resizes each image to 32×200, converts to grayscale, and normalizes to [0,1] — no thresholding or segmentation. Saves whole-image arrays (`X_*.npy`), integer label sequences (`y_*.npy`, shape `(N, 4)`), and `char_classes.json` to `data/processed/`. Also writes `sample_check.png` (5 preprocessed images) so you can confirm glyphs are legible.
 
 Options:
 ```
 --input   Raw CAPTCHA directory   (default: data/dataset)
 --output  Processed data output   (default: data/processed)
 ```
-
-Segmentation uses vertical projection — skip rate should be ~0% on synthetic data.
 
 ---
 
@@ -132,14 +130,21 @@ Segmentation uses vertical projection — skip rate should be ~0% on synthetic d
 python -m model.train
 ```
 
-Trains the CNN character classifier and saves the best model to `model/saved_model/captcha_model.h5`. Prints per-character and estimated per-CAPTCHA validation accuracy after training.
+Trains the CRNN with CTC loss and saves the best inference model (image → softmax) to `model/saved_model/captcha_model.h5`. A custom callback greedy-decodes the validation set each epoch and logs real per-character and full-CAPTCHA accuracy.
+
+> **Validation gate — run this first.** Before a full run, confirm the pipeline is wired correctly by overfitting a tiny subset:
+> ```bash
+> python -m model.train --overfit 100
+> ```
+> It must reach ~100% full-CAPTCHA accuracy on 100 samples. If it can't memorize 100 images, the loss/decode wiring is broken — fix that before training for real.
 
 Options:
 ```
---data     Processed data directory   (default: data/processed)
---output   Model output directory     (default: model/saved_model)
---epochs   Max training epochs        (default: 15)
---batch    Batch size                 (default: 64)
+--data        Processed data directory   (default: data/processed)
+--output      Model output directory     (default: model/saved_model)
+--epochs      Max training epochs        (default: 50)
+--batch-size  Batch size                 (default: 32)
+--overfit N   Overfit N samples to verify wiring, then exit (gate)
 ```
 
 ---
@@ -181,35 +186,60 @@ Converts `captcha_model.h5` to TensorFlow.js LayersModel format and copies the o
 
 ### Preprocessing
 
-Each CAPTCHA image is converted to grayscale and binarized using Otsu's method with `THRESH_BINARY_INV`, producing white characters on a black background. A morphological close operation removes noise.
+Preprocessing is deliberately minimal — the CRNN learns its own features, so the goal is to preserve information, not to clean the image. Each CAPTCHA is resized to 32×200, converted to grayscale, and normalized to [0, 1]. **No thresholding or segmentation.**
 
-Character segmentation uses **vertical projection**: white pixel values are summed along every column to produce a 1D density profile. The 3 columns with the lowest pixel density — the natural gaps between characters — are found near the expected boundaries (25%, 50%, 75% of image width, ±20px search window). These become the split points, dividing the image into 4 strips. Each strip is resized to 28×28 and normalized to [0, 1].
-
-This approach was chosen over contour-based segmentation because the `captcha` library renders noise curves that bridge characters together, merging all 4 letters into a single connected component. Projection segmentation is immune to this — it works directly on pixel density regardless of connectivity.
+Earlier versions used Otsu binarization, but the `captcha` library renders colored glyphs over noise curves: a global threshold merges glyphs with the noise and destroys the stroke detail the convolutional layers rely on. Feeding full grayscale keeps that signal intact.
 
 The same pipeline is re-implemented in JavaScript (`preprocessing.js`) for browser-side use, matching the Python output without requiring OpenCV.js.
 
 ### Model
 
-A compact CNN with two convolutional blocks followed by a fully connected classifier:
+A CRNN: convolutional feature extractor → sequence model → CTC. The convolutions pool height aggressively but keep the width as a 50-step time axis, so the bidirectional LSTMs read the image left-to-right and CTC aligns that 50-step sequence to the 4-character label.
 
 | Layer | Output Shape | Notes |
 |---|---|---|
-| Conv2D(32, 3×3) + BatchNorm + ReLU | 28×28×32 | Learns edges and strokes |
-| MaxPooling(2×2) | 14×14×32 | Translation invariance |
-| Conv2D(64, 3×3) + BatchNorm + ReLU | 14×14×64 | Learns letter shapes |
-| MaxPooling(2×2) | 7×7×64 | |
-| Flatten | 3136 | |
-| Dense(128) + Dropout(0.4) | 128 | Classification head |
-| Dense(36, softmax) | 36 | One class per character |
+| Conv2D(64, 3×3) + BN + ReLU + MaxPool(2,2) | 16×100×64 | Edges and strokes |
+| Conv2D(128, 3×3) + BN + ReLU + MaxPool(2,2) | 8×50×128 | Letter parts |
+| Conv2D(256, 3×3) + BN + ReLU + MaxPool(2,1) | 4×50×256 | Pool height only |
+| Conv2D(256, 3×3) + BN + ReLU + MaxPool(2,1) | 2×50×256 | Preserve width = timesteps |
+| Permute + Reshape | 50×512 | Width becomes the time axis |
+| Dense(64, ReLU) | 50×64 | Feature bottleneck |
+| Bidirectional LSTM(128) ×2 | 50×256 | Left-right sequence context |
+| Dense(37, softmax) | 50×37 | 36 classes + 1 CTC blank |
 
-Trained with Adam (lr=0.001), categorical cross-entropy loss, early stopping on val_loss (patience=4), and ReduceLROnPlateau.
+Trained end-to-end with **CTC loss** (no per-character labels or segmentation), Adam (lr=0.002, gradient clipping), early stopping on val_loss (patience=8), and ReduceLROnPlateau. Training batches drop the final remainder so a tiny last batch can't corrupt BatchNorm's inference statistics. Inference uses greedy CTC decoding.
+
+Why CRNN+CTC over the earlier per-character CNN: the previous design used global average pooling, which discarded all spatial layout — the per-position heads couldn't tell character 1 from character 4 and stalled near the 1/36 random baseline. The CRNN keeps the horizontal sequence intact, which is exactly what positional character recognition needs.
 
 ### Chrome Extension
 
-The extension loads TF.js from a bundled `tf.min.js` (no CDN, works on sites with strict CSPs). When a CAPTCHA image is detected on a page, the model is lazy-loaded once and cached. The JS preprocessing pipeline segments the CAPTCHA, the model classifies each character, and the predicted text is filled into the nearest CAPTCHA input field.
+The extension loads TF.js from a bundled `tf.min.js` (no CDN, works on sites with strict CSPs). When a CAPTCHA image is detected on a page, the model is lazy-loaded once and cached. The JS preprocessing pipeline resizes and normalizes the whole image, the CRNN produces a per-timestep softmax sequence, a greedy CTC decode (reimplemented in JS, since TF.js has no built-in `ctc_decode`) turns it into text, and the result is filled into the nearest CAPTCHA input field.
 
 Character class ordering is loaded at runtime from `char_classes.json` (generated during training), not hardcoded — ensuring the extension's label mapping always matches the model exactly.
+
+---
+
+## Validation Gates
+
+CTC models fail *silently*: a wiring bug (mis-encoded labels, wrong blank-token index, a transposed time axis, or a mismatched decode) doesn't crash — it just trains to garbage that looks like a "bad model." Earlier iterations of this project burned several full training runs on exactly this. To prevent that, the pipeline is instrumented with four cheap gates that must pass **before** any expensive training run. Each isolates a different failure class and runs in seconds to minutes.
+
+| Gate | What it checks | How to run | Utility it serves |
+|---|---|---|---|
+| **1 — Visual** | Preprocessed glyphs are still legible (grayscale preserved, not destroyed) | inspect `data/processed/sample_check.png` after `python -m preprocessing.preprocess` | Catches preprocessing that silently destroys the signal (e.g. over-aggressive thresholding). No model can recover from ruined input. |
+| **2 — Label round-trip** | `char → index → char` encoding is loss-less and aligned with filenames | automatic assert during `python -m preprocessing.preprocess` | Catches off-by-one / blank-token / class-ordering bugs in the label mapping — the most common cause of a model that "won't learn." |
+| **3 — Build-time shape** | The CNN produces `TIME_STEPS` (50) ≥ label length (4), and the realized time axis matches | automatic assert in `build_model()` | Guarantees CTC always has room to align the sequence; fails loudly if a future architecture change over-pools the width. |
+| **4 — Overfit 100** | The full pipeline can memorize 100 samples to ~100% accuracy | `python -m model.train --overfit 100` | The decisive end-to-end proof. If the model can't memorize 100 images, the loss/decode wiring is broken — fix that before spending a real run. This is the gate that catches what static checks can't. |
+
+> **Workflow:** run gates 1–3 (free, part of preprocessing/build), then gate 4. Only launch the full training run after gate 4 prints `GATE 4 PASSED`.
+
+### What the gates uncovered
+
+Building this model, the gates surfaced two non-obvious, silent failures that would otherwise have wasted multi-hour runs:
+
+1. **BatchNorm corruption from a tiny remainder batch.** A final mini-batch of just a few samples produced garbage BatchNorm statistics that poisoned the moving averages used at *inference* time. Training loss looked healthy (≈0.5) while decoded accuracy stayed at 0%. Fix: training batches now drop the remainder.
+2. **Learning rate too high for mini-batch noise.** `lr=5e-3` made the loss bounce instead of descend under mini-batch gradient noise (it only worked full-batch). Fix: `lr=2e-3`, with gradient clipping and `ReduceLROnPlateau`.
+
+With both fixes, gate 4 reaches **100% full-CAPTCHA accuracy** on 100 samples — confirming the pipeline end-to-end.
 
 ---
 
