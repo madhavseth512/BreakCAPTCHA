@@ -67,6 +67,49 @@ BreakCAPTCHA/
 
 ---
 
+## Results
+
+Trained on 40,000 synthetic CAPTCHAs and evaluated on a held-out 10,000-image validation set.
+
+| Metric | Value |
+|---|---|
+| **Full-CAPTCHA accuracy** (all 4 chars correct) | **97.05%** (9,705 / 10,000) |
+| **Per-character accuracy** | **99.18%** |
+| Best epoch | 18 (early-stopped at 25, best weights restored) |
+| Validation CTC loss | 0.139 |
+
+**Per-position accuracy** is high and even across all four slots — the model has no positional weak spot:
+
+| char 1 | char 2 | char 3 | char 4 |
+|---|---|---|---|
+| 99.53% | 99.08% | 99.05% | 99.06% |
+
+### Training curves
+
+![Training history](assets/training_history.png)
+
+The run tells a clear story. Training loss descends cleanly throughout, but validation **oscillates violently for the first ~16 epochs** (swinging between ~97% and near-zero) before locking in. This is a BatchNorm train/inference statistics mismatch: while the weights move fast, BatchNorm's stored moving-average statistics lag behind, so the inference path is unstable. As the learning rate steps down (`ReduceLROnPlateau`: 2e-3 → 1e-3 → 5e-4) the weight updates shrink, the statistics catch up, and from epoch ~17 onward validation is rock-steady at ~97%. (See [Future Work](#future-work) for the clean fix.)
+
+### Error analysis — errors are concentrated and explainable
+
+34 of the 36 character classes achieve an f1-score of **1.00**. Virtually all error comes from a single, genuinely ambiguous pair:
+
+| Confusion | Count |
+|---|---|
+| `0` → `O` | 109 |
+| `O` → `0` | 84 |
+| every other confusion | ≤ 4 each |
+
+The `0`↔`O` pair alone accounts for **~60% of all character-level mistakes**. Since `0` and `O` are near-identical glyphs in this font, this is close to the irreducible error floor — there is little signal in the image to separate them without surrounding context.
+
+### Sample predictions
+
+![Sample predictions](assets/prediction_samples.png)
+
+*Actual (A) vs Predicted (P) — green = correct, red = wrong. The wrong example is a `0`→`O` substitution, consistent with the error analysis above.*
+
+---
+
 ## Setup
 
 **Requirements:** Python 3.11, pip, Google Chrome
@@ -233,49 +276,6 @@ CTC models fail *silently*: a wiring bug (mis-encoded labels, wrong blank-token 
 | **4 — Overfit 100** | The full pipeline can memorize 100 samples to ~100% accuracy | `python -m model.train --overfit 100` | The decisive end-to-end proof. If the model can't memorize 100 images, the loss/decode wiring is broken — fix that before spending a real run. This is the gate that catches what static checks can't. |
 
 > **Workflow:** run gates 1–3 (free, part of preprocessing/build), then gate 4. Only launch the full training run after gate 4 prints `GATE 4 PASSED`. The silent bugs these gates caught are walked through in [Challenges & Debugging](#challenges--debugging).
-
----
-
-## Results
-
-Trained on 40,000 synthetic CAPTCHAs and evaluated on a held-out 10,000-image validation set.
-
-| Metric | Value |
-|---|---|
-| **Full-CAPTCHA accuracy** (all 4 chars correct) | **97.05%** (9,705 / 10,000) |
-| **Per-character accuracy** | **99.18%** |
-| Best epoch | 18 (early-stopped at 25, best weights restored) |
-| Validation CTC loss | 0.139 |
-
-**Per-position accuracy** is high and even across all four slots — the model has no positional weak spot:
-
-| char 1 | char 2 | char 3 | char 4 |
-|---|---|---|---|
-| 99.53% | 99.08% | 99.05% | 99.06% |
-
-### Training curves
-
-![Training history](assets/training_history.png)
-
-The run tells a clear story. Training loss descends cleanly throughout, but validation **oscillates violently for the first ~16 epochs** (swinging between ~97% and near-zero) before locking in. This is a BatchNorm train/inference statistics mismatch: while the weights move fast, BatchNorm's stored moving-average statistics lag behind, so the inference path is unstable. As the learning rate steps down (`ReduceLROnPlateau`: 2e-3 → 1e-3 → 5e-4) the weight updates shrink, the statistics catch up, and from epoch ~17 onward validation is rock-steady at ~97%. (See [Future Work](#future-work) for the clean fix.)
-
-### Error analysis — errors are concentrated and explainable
-
-34 of the 36 character classes achieve an f1-score of **1.00**. Virtually all error comes from a single, genuinely ambiguous pair:
-
-| Confusion | Count |
-|---|---|
-| `0` → `O` | 109 |
-| `O` → `0` | 84 |
-| every other confusion | ≤ 4 each |
-
-The `0`↔`O` pair alone accounts for **~60% of all character-level mistakes**. Since `0` and `O` are near-identical glyphs in this font, this is close to the irreducible error floor — there is little signal in the image to separate them without surrounding context.
-
-### Sample predictions
-
-![Sample predictions](assets/prediction_samples.png)
-
-*Actual (A) vs Predicted (P) — green = correct, red = wrong. The wrong example is a `0`→`O` substitution, consistent with the error analysis above.*
 
 ---
 
