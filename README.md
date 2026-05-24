@@ -8,6 +8,8 @@ A CNN-based CAPTCHA solver that generates synthetic training data, preprocesses 
 
 BreakCAPTCHA targets standard 4-character alphanumeric CAPTCHAs (A–Z, 0–9). It treats CAPTCHA solving as a sequence recognition problem: the full image is fed to a CRNN (convolutional layers followed by bidirectional LSTMs) and trained end-to-end with CTC loss, which aligns the model's per-column output to the 4-character label without any explicit segmentation. The trained model is exported to TensorFlow.js and bundled inside a Chrome extension that auto-detects and solves CAPTCHAs on any webpage.
 
+On a held-out set of 10,000 synthetic CAPTCHAs, the model reaches **97.05% full-string accuracy** and **99.18% per-character accuracy** (see [Results](#results)).
+
 ---
 
 ## Architecture
@@ -230,16 +232,101 @@ CTC models fail *silently*: a wiring bug (mis-encoded labels, wrong blank-token 
 | **3 — Build-time shape** | The CNN produces `TIME_STEPS` (50) ≥ label length (4), and the realized time axis matches | automatic assert in `build_model()` | Guarantees CTC always has room to align the sequence; fails loudly if a future architecture change over-pools the width. |
 | **4 — Overfit 100** | The full pipeline can memorize 100 samples to ~100% accuracy | `python -m model.train --overfit 100` | The decisive end-to-end proof. If the model can't memorize 100 images, the loss/decode wiring is broken — fix that before spending a real run. This is the gate that catches what static checks can't. |
 
-> **Workflow:** run gates 1–3 (free, part of preprocessing/build), then gate 4. Only launch the full training run after gate 4 prints `GATE 4 PASSED`.
+> **Workflow:** run gates 1–3 (free, part of preprocessing/build), then gate 4. Only launch the full training run after gate 4 prints `GATE 4 PASSED`. The silent bugs these gates caught are walked through in [Challenges & Debugging](#challenges--debugging).
 
-### What the gates uncovered
+---
 
-Building this model, the gates surfaced two non-obvious, silent failures that would otherwise have wasted multi-hour runs:
+## Results
 
-1. **BatchNorm corruption from a tiny remainder batch.** A final mini-batch of just a few samples produced garbage BatchNorm statistics that poisoned the moving averages used at *inference* time. Training loss looked healthy (≈0.5) while decoded accuracy stayed at 0%. Fix: training batches now drop the remainder.
-2. **Learning rate too high for mini-batch noise.** `lr=5e-3` made the loss bounce instead of descend under mini-batch gradient noise (it only worked full-batch). Fix: `lr=2e-3`, with gradient clipping and `ReduceLROnPlateau`.
+Trained on 40,000 synthetic CAPTCHAs and evaluated on a held-out 10,000-image validation set.
 
-With both fixes, gate 4 reaches **100% full-CAPTCHA accuracy** on 100 samples — confirming the pipeline end-to-end.
+| Metric | Value |
+|---|---|
+| **Full-CAPTCHA accuracy** (all 4 chars correct) | **97.05%** (9,705 / 10,000) |
+| **Per-character accuracy** | **99.18%** |
+| Best epoch | 18 (early-stopped at 25, best weights restored) |
+| Validation CTC loss | 0.139 |
+
+**Per-position accuracy** is high and even across all four slots — the model has no positional weak spot:
+
+| char 1 | char 2 | char 3 | char 4 |
+|---|---|---|---|
+| 99.53% | 99.08% | 99.05% | 99.06% |
+
+### Training curves
+
+![Training history](assets/training_history.png)
+
+The run tells a clear story. Training loss descends cleanly throughout, but validation **oscillates violently for the first ~16 epochs** (swinging between ~97% and near-zero) before locking in. This is a BatchNorm train/inference statistics mismatch: while the weights move fast, BatchNorm's stored moving-average statistics lag behind, so the inference path is unstable. As the learning rate steps down (`ReduceLROnPlateau`: 2e-3 → 1e-3 → 5e-4) the weight updates shrink, the statistics catch up, and from epoch ~17 onward validation is rock-steady at ~97%. (See [Future Work](#future-work) for the clean fix.)
+
+### Error analysis — errors are concentrated and explainable
+
+34 of the 36 character classes achieve an f1-score of **1.00**. Virtually all error comes from a single, genuinely ambiguous pair:
+
+| Confusion | Count |
+|---|---|
+| `0` → `O` | 109 |
+| `O` → `0` | 84 |
+| every other confusion | ≤ 4 each |
+
+The `0`↔`O` pair alone accounts for **~60% of all character-level mistakes**. Since `0` and `O` are near-identical glyphs in this font, this is close to the irreducible error floor — there is little signal in the image to separate them without surrounding context.
+
+### Sample predictions
+
+![Sample predictions](assets/prediction_samples.png)
+
+*Actual (A) vs Predicted (P) — green = correct, red = wrong. The wrong example is a `0`→`O` substitution, consistent with the error analysis above.*
+
+---
+
+## Challenges & Debugging
+
+Reaching 97% took several dead ends. The diagnoses — not just the final architecture — are the substance of this project, so they're documented here.
+
+**1. Four failed runs with the original architecture.** The first design segmented characters, then evolved into a multi-output CNN (one softmax head per position) fed by a `GlobalAveragePooling2D` layer. Every run plateaued at **3–5% per-character accuracy — essentially the 1/36 random baseline.** Diagnosis: global average pooling collapses all spatial information into a single vector, so each per-position head received an *identical* input and could not tell character 1 from character 4. The architecture was structurally incapable of positional recognition (and Otsu binarization was separately destroying glyph detail). → Switched to **CRNN + CTC**, which preserves the horizontal sequence and aligns it to the label without segmentation.
+
+**2. CTC "blank collapse."** The first overfit gate failed: training loss fell to ~15 and froze while accuracy stayed at 0 — the model had collapsed to predicting the CTC blank token everywhere. To separate a *pipeline* bug from an *architecture* bug, I ran the same CTC plumbing on a deliberately simple CRNN; it failed identically, proving the wiring was sound and the problem was training dynamics. A controlled run then showed the model *could* learn (loss descended, just glacially) — so the cause was optimization speed, not a wiring error.
+
+**3. Mini-batch instability.** Raising the learning rate to 5e-3 let the model memorize 16 samples perfectly in full-batch mode, but the 100-sample gate still bounced at a loss of ~12. Two interacting causes: a tiny final mini-batch poisoned BatchNorm's statistics, and 5e-3 was too high under mini-batch gradient noise. → Dropped the remainder batch and set `lr=2e-3`; the gate then reached **100%**.
+
+**4. Validation oscillation during the full run.** For the first ~16 epochs, validation accuracy swung between ~97% and near-zero while training loss fell smoothly. This is a BatchNorm train/inference mismatch — fast-moving weights outran BatchNorm's moving-average statistics, so the inference path was unstable. It self-corrected as `ReduceLROnPlateau` shrank the learning rate (2e-3 → 1e-3 → 5e-4) and the statistics caught up; validation locked in at ~97% from epoch 17.
+
+| Symptom | Root cause | Fix |
+|---|---|---|
+| 4 runs stuck near random (3–5%) | GlobalAveragePooling destroyed positional information | CRNN + CTC sequence model |
+| Loss frozen at ~15, 0% accuracy | CTC blank collapse / too-slow convergence | higher LR; pipeline confirmed correct via control experiment |
+| 100-sample gate bouncing at ~12 | tiny remainder batch corrupting BatchNorm + LR too high for mini-batch noise | drop remainder batch; `lr=2e-3` |
+| Validation swinging 97%↔0% for ~16 epochs | BatchNorm inference-stat lag under fast weight movement | LR decay let stats stabilize (GroupNorm would prevent it — see Future Work) |
+
+**What I would improve: training stability.** The recurring culprit was BatchNorm's train/inference statistics gap — it caused both the 100-sample gate bounce and the validation oscillation. Replacing BatchNorm with GroupNorm or LayerNorm (which have no moving-average statistics and behave identically in training and inference) would eliminate the instability entirely and likely allow stable training at a higher learning rate. It's the single highest-value change for a future run.
+
+---
+
+## Limitations
+
+These are stated explicitly because they bound what the 97% number actually means:
+
+1. **In-distribution accuracy only.** Training and validation data both come from the same Python `captcha` library with a single rendering style, so 97% measures how well the model learned *this generator* — not CAPTCHAs in general. There is no real-world or cross-generator test set, so true generalization is unmeasured. Against real CAPTCHAs (different fonts, colors, noise, anti-bot styling) accuracy would be **substantially lower**.
+2. **Fixed 4-character length.** The character count is baked into `TIME_STEPS`, the label shape, and the decode. Variable-length CAPTCHAs would require pipeline changes (CTC itself supports them, but the current code does not).
+3. **Single font / generator.** No visual diversity in the dataset, which is the main reason for the domain gap in (1).
+4. **`0`/`O` ambiguity is unresolved** and dominates the error — inherent to the glyphs in this font rather than a model defect.
+5. **No augmentation or regularization.** Final train loss (~0.01) is far below validation loss (~0.14) — mild overfitting. Augmentation/dropout would tighten this and improve robustness.
+6. **Training was unstable.** The BatchNorm oscillation (see Results) made the run fragile — an unlucky early-stop on a "good" spike could have shipped a worse model. The final model is fine because best weights were restored, but the process needs hardening.
+7. **Greedy CTC decoding**, not beam search — leaves a little accuracy on the table for ambiguous inputs.
+8. **Deployment not built.** The Chrome extension and the JavaScript CTC decoder are not implemented yet, and training is CPU-only (~3.5 hrs for this run).
+
+---
+
+## Future Work
+
+Concrete next steps, roughly in order of value:
+
+- **Replace BatchNorm with GroupNorm (or LayerNorm).** These have no train/inference statistics gap, which would eliminate the validation oscillation and likely allow stable training at a higher learning rate — directly fixing the biggest process limitation.
+- **Data augmentation + multiple generators/fonts.** Rotation, scaling, blur, and elastic distortion, plus CAPTCHAs from several libraries, would attack the domain gap and give a meaningful estimate of real-world generalization.
+- **A real-world / cross-generator test set** to measure out-of-distribution accuracy honestly.
+- **Variable-length support.** Generalize `TIME_STEPS`, labels, and decode so the model handles 4–6 character CAPTCHAs (CTC already supports this).
+- **Beam-search decoding** to recover a few of the ambiguous cases greedy decoding misses.
+- **Migrate `.h5` → `.keras`** to drop the legacy-format save warning.
 
 ---
 
