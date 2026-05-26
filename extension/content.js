@@ -1,41 +1,53 @@
 'use strict';
 
-// Loaded after tf.min.js, preprocessing.js, solver.js.
-// Listens for {action: "solve"} from popup.js and solves the CAPTCHA on the page.
+// Lightweight content script — no TF.js here.
+// Inference runs in the popup page (normal HTML context) where TF.js loads reliably.
+// This script does two things only:
+//   1. Extract CAPTCHA image pixels (getImageData) and send them to the popup.
+//   2. Fill the CAPTCHA input with the solved text (fillInput).
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-    if (msg.action !== 'solve') return;
-
-    _solveCurrentPage()
-        .then(result => sendResponse({ ok: true,  result }))
-        .catch(err   => sendResponse({ ok: false, error: err.message }));
-
-    return true;  // keep the message channel open for the async response
+    if (msg.action === 'getImageData') {
+        sendResponse(_extractImageData());
+        return false;
+    }
+    if (msg.action === 'fillInput') {
+        _fillInput(msg.text);
+        sendResponse({ ok: true });
+        return false;
+    }
 });
 
-async function _solveCurrentPage() {
+function _extractImageData() {
     const img = _findCaptchaImage();
-    if (!img) throw new Error('No CAPTCHA image found on this page.');
+    if (!img)                                  return { ok: false, error: 'No CAPTCHA image found on this page.' };
+    if (!img.complete || !img.naturalWidth)    return { ok: false, error: 'CAPTCHA image has not finished loading.' };
 
-    // Wait for the image to finish loading (needed if src was just set).
-    await _waitForImage(img);
+    const canvas = document.createElement('canvas');
+    canvas.width  = 200;
+    canvas.height = 32;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(img, 0, 0, 200, 32);
 
-    const text = await solveImage(img);
-
-    const input = _findCaptchaInput();
-    if (input) {
-        input.value = text;
-        input.dispatchEvent(new Event('input',  { bubbles: true }));
-        input.dispatchEvent(new Event('change', { bubbles: true }));
+    let imageData;
+    try {
+        imageData = ctx.getImageData(0, 0, 200, 32);
+    } catch (e) {
+        return { ok: false, error: 'Cannot read CAPTCHA pixels (cross-origin image?).' };
     }
 
-    return text;
+    // Convert Uint8ClampedArray -> plain Array for structured-clone transfer.
+    return { ok: true, pixels: Array.from(imageData.data), width: 200, height: 32 };
 }
 
-/**
- * Find the CAPTCHA image on the page.
- * Priority order: explicit class/id → any img whose id/class/src contains "captcha".
- */
+function _fillInput(text) {
+    const input = _findCaptchaInput();
+    if (!input) return;
+    input.value = text;
+    input.dispatchEvent(new Event('input',  { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
 function _findCaptchaImage() {
     return (
         document.querySelector('img.captcha-image') ||
@@ -48,10 +60,6 @@ function _findCaptchaImage() {
     );
 }
 
-/**
- * Find the text input to fill in.
- * Priority: explicit captcha class/name → any visible text input.
- */
 function _findCaptchaInput() {
     return (
         document.querySelector('input.captcha-input')   ||
@@ -60,12 +68,4 @@ function _findCaptchaInput() {
         document.querySelector('input:not([type])')     ||
         null
     );
-}
-
-function _waitForImage(img) {
-    if (img.complete && img.naturalWidth > 0) return Promise.resolve();
-    return new Promise((resolve, reject) => {
-        img.onload  = resolve;
-        img.onerror = () => reject(new Error('CAPTCHA image failed to load.'));
-    });
 }

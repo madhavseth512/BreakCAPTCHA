@@ -1,38 +1,27 @@
 'use strict';
 
-// Loaded after tf.min.js.
-// Must match Python preprocess.py exactly:
-//   cv2.resize(img, (200, 32), interpolation=INTER_AREA)
-//   cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)  -> 0.299*R + 0.587*G + 0.114*B
-//   gray / 255.0
+// Runs in the popup page after tf-core.min.js.
+// Receives raw RGBA pixel data (already resized to 200x32 by content.js canvas)
+// and returns a [1, 32, 200, 1] float32 tensor.
 //
-// Canvas uses bilinear resize (vs. INTER_AREA in Python). The difference is
-// minor for smooth CAPTCHA glyphs and the model is robust to it.
-
-const _TARGET_W = 200;
-const _TARGET_H = 32;
+// Grayscale formula matches Python preprocess.py exactly:
+//   cv2.COLOR_BGR2GRAY = 0.114*B + 0.587*G + 0.299*R
+//   Canvas pixel order: R, G, B, A  →  0.299*R + 0.587*G + 0.114*B
 
 /**
- * Preprocess a CAPTCHA <img> element into a [1, 32, 200, 1] float32 tensor.
- * The tensor must be disposed by the caller after use.
+ * @param {number[]} rgbaPixels  Flat RGBA array, length = width * height * 4.
+ * @param {number}   width       Should be 200.
+ * @param {number}   height      Should be 32.
+ * @returns {tf.Tensor4D}  Shape [1, height, width, 1], float32. Caller must dispose.
  */
-function preprocessCaptcha(imgElement) {
-    const canvas = document.createElement('canvas');
-    canvas.width  = _TARGET_W;
-    canvas.height = _TARGET_H;
-
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(imgElement, 0, 0, _TARGET_W, _TARGET_H);
-
-    const { data } = ctx.getImageData(0, 0, _TARGET_W, _TARGET_H);  // RGBA uint8, row-major
-
-    const gray = new Float32Array(_TARGET_W * _TARGET_H);
-    for (let i = 0; i < _TARGET_W * _TARGET_H; i++) {
-        // Canvas: R=data[4i], G=data[4i+1], B=data[4i+2]
-        // OpenCV BGR2GRAY: 0.114*B + 0.587*G + 0.299*R  (same formula, different channel order)
-        gray[i] = (0.299 * data[i * 4] + 0.587 * data[i * 4 + 1] + 0.114 * data[i * 4 + 2]) / 255;
+function preprocessFromPixels(rgbaPixels, width, height) {
+    const gray = new Float32Array(width * height);
+    for (let i = 0; i < width * height; i++) {
+        gray[i] = (
+            0.299 * rgbaPixels[i * 4]     +   // R
+            0.587 * rgbaPixels[i * 4 + 1] +   // G
+            0.114 * rgbaPixels[i * 4 + 2]     // B
+        ) / 255;
     }
-
-    // Shape: [batch=1, H=32, W=200, C=1]
-    return tf.tensor(gray, [1, _TARGET_H, _TARGET_W, 1], 'float32');
+    return tf.tensor(gray, [1, height, width, 1], 'float32');
 }

@@ -4,7 +4,7 @@ data/processed/
 model/saved_model/
 export/tfjs_model/
 extension/tfjs_model/
-extension/lib/tf.min.js
+extension/lib/
 __pycache__/
 *.pyc
 .env

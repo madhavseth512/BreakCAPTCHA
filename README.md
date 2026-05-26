@@ -58,7 +58,7 @@ BreakCAPTCHA/
 │   ├── popup.html / popup.js     # Toggle UI
 │   ├── preprocessing.js          # Browser-side image preprocessing
 │   ├── solver.js                 # TF.js model loading + inference
-│   ├── lib/                      # Bundled TF.js (tf.min.js)
+│   ├── lib/                      # TF.js CPU bundles (gitignored — see Phase 6)
 │   └── tfjs_model/               # Converted model files (gitignored)
 ├── requirements.txt
 ├── .gitignore
@@ -225,10 +225,23 @@ into `export/tfjs_model/`, and mirrors it (along with `char_classes.json`) into
 **One-time setup:**
 
 ```bash
-# 1. Download tf.min.js (TF.js v4.10.0 browser bundle) and place it at:
-#      extension/lib/tf.min.js
-#    Direct URL:
-#      https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.10.0/dist/tf.min.js
+# 1. Download the TF.js CPU-only bundles into extension/lib/
+#    (The full tf.min.js bundle uses eval() for WebGL shaders,
+#     which Chrome MV3 blocks — these three files avoid that.)
+python - <<'EOF'
+import urllib.request, os
+base = 'extension/lib'
+os.makedirs(base, exist_ok=True)
+pkgs = [
+    ('tf-core.min.js',        'tfjs-core'),
+    ('tf-layers.min.js',      'tfjs-layers'),
+    ('tf-backend-cpu.min.js', 'tfjs-backend-cpu'),
+]
+for fname, pkg in pkgs:
+    url = f'https://cdn.jsdelivr.net/npm/@tensorflow/{pkg}@4.10.0/dist/{fname}'
+    urllib.request.urlretrieve(url, os.path.join(base, fname))
+    print(f'Downloaded {fname}')
+EOF
 
 # 2. Generate extension icons (uses cv2, already installed)
 python extension/generate_icons.py
@@ -289,7 +302,13 @@ Why CRNN+CTC over the earlier per-character CNN: the previous design used global
 
 ### Chrome Extension
 
-The extension loads TF.js from a bundled `tf.min.js` (no CDN, works on sites with strict CSPs). When a CAPTCHA image is detected on a page, the model is lazy-loaded once and cached. The JS preprocessing pipeline resizes and normalizes the whole image, the CRNN produces a per-timestep softmax sequence, a greedy CTC decode (reimplemented in JS, since TF.js has no built-in `ctc_decode`) turns it into text, and the result is filled into the nearest CAPTCHA input field.
+The extension runs fully client-side with no CDN requests at runtime. Inference runs in the popup page (a normal browser HTML context), not in the content script's isolated world — this is required because Chrome MV3 isolates content scripts from the page's `window`, which prevents the TF.js UMD global from registering correctly there.
+
+Three separate TF.js packages are bundled locally (`tf-core`, `tf-layers`, `tf-backend-cpu`) rather than the monolithic `tf.min.js`. The full bundle includes the WebGL backend, which compiles GLSL shaders using `new Function()` — blocked by Chrome MV3's strict CSP even in popup pages. The CPU-only split avoids this entirely.
+
+All tensor operations use TF.js's functional API (`tf.squeeze(t, axes)`, `tf.argMax(t, axis)`) rather than tensor instance methods. When loading `tf-layers` and `tf-core` as separate UMD bundles, the layers model's output tensors carry `tf-layers`' internal Tensor prototype rather than `window.tf`'s — instance methods like `.squeeze()` are absent. The functional forms from `window.tf` operate on the shared backend registry and work correctly regardless of which Tensor class created the tensor.
+
+The inference flow: content script detects the CAPTCHA `<img>` element, draws it to an offscreen 200×32 canvas, and sends the raw RGBA pixel array to the popup via message passing. The popup's JS preprocessing pipeline converts RGBA to grayscale using the same formula as Python's `cv2.COLOR_BGR2GRAY` and normalizes to [0,1]. The CRNN produces a 50-step softmax sequence; a greedy CTC decode (reimplemented in JS) collapses repeated tokens, strips the blank, and maps indices to characters. The result is filled into the nearest CAPTCHA input field.
 
 Character class ordering is loaded at runtime from `char_classes.json` (generated during training), not hardcoded — ensuring the extension's label mapping always matches the model exactly.
 
