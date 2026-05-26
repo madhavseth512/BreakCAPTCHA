@@ -207,23 +207,54 @@ Reports per-character accuracy, per-CAPTCHA accuracy, per-class breakdown, and 1
 ### Phase 5 — Export to TF.js
 
 ```bash
-# Install TF.js converter (separate from main requirements)
+# Install TF.js converter (separate from main requirements due to heavy deps)
 pip install tensorflowjs==4.10.0
+# If jax/jaxlib cause failures: pip install tensorflowjs==4.10.0 --no-deps
 
 python -m export.convert_to_tfjs
 ```
 
-Converts `captcha_model.h5` to TensorFlow.js LayersModel format and copies the output + `char_classes.json` into `extension/tfjs_model/`.
+Converts `captcha_model.h5` to TensorFlow.js LayersModel format, copies the output
+into `export/tfjs_model/`, and mirrors it (along with `char_classes.json`) into
+`extension/tfjs_model/` so the extension is immediately ready to load.
 
 ---
 
-### Phase 6 — Load the Chrome Extension
+### Phase 6 — Run the Chrome Extension
 
-1. Download `tf.min.js` from the [TensorFlow.js releases](https://github.com/tensorflow/tfjs/releases) and place it at `extension/lib/tf.min.js`
-2. Open Chrome and navigate to `chrome://extensions`
-3. Enable **Developer mode** (top-right toggle)
-4. Click **Load unpacked** and select the `extension/` directory
-5. The BreakCAPTCHA icon will appear in the toolbar — click it to enable/disable
+**One-time setup:**
+
+```bash
+# 1. Download tf.min.js (TF.js v4.10.0 browser bundle) and place it at:
+#      extension/lib/tf.min.js
+#    Direct URL:
+#      https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.10.0/dist/tf.min.js
+
+# 2. Generate extension icons (uses cv2, already installed)
+python extension/generate_icons.py
+
+# 3. Generate local test CAPTCHAs
+python test_page/generate_test_captchas.py
+```
+
+**Load the extension in Chrome:**
+
+1. Open `chrome://extensions`
+2. Enable **Developer mode** (top-right toggle)
+3. Click **Load unpacked** and select the `extension/` directory
+4. The BreakCAPTCHA icon appears in the toolbar
+
+**Test it:**
+
+```bash
+# Serve the local test page
+python -m http.server 8080 --directory test_page
+```
+
+1. Open `http://localhost:8080` in Chrome
+2. Reload the tab so the content scripts inject (first load after extension install)
+3. Click the **BreakCAPTCHA** toolbar icon → click **Solve CAPTCHA**
+4. The decoded text fills the input automatically — click **Check** to verify
 
 ---
 
@@ -313,7 +344,7 @@ These are stated explicitly because they bound what the 97% number actually mean
 5. **No augmentation or regularization.** Final train loss (~0.01) is far below validation loss (~0.14) — mild overfitting. Augmentation/dropout would tighten this and improve robustness.
 6. **Training was unstable.** The BatchNorm oscillation (see Results) made the run fragile — an unlucky early-stop on a "good" spike could have shipped a worse model. The final model is fine because best weights were restored, but the process needs hardening.
 7. **Greedy CTC decoding**, not beam search — leaves a little accuracy on the table for ambiguous inputs.
-8. **Deployment not built.** The Chrome extension and the JavaScript CTC decoder are not implemented yet, and training is CPU-only (~3.5 hrs for this run).
+8. **Training is CPU-only** (~3.5 hrs for this run). GPU training requires WSL2.
 
 ---
 

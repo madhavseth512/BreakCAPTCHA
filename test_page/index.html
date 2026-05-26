@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>BreakCAPTCHA — Local Test Page</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #f0f2f5;
+      color: #333;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 60px 16px;
+      min-height: 100vh;
+    }
+    h1   { font-size: 22px; font-weight: 700; margin-bottom: 4px; }
+    .sub { color: #888; font-size: 13px; margin-bottom: 28px; }
+
+    .card {
+      background: white;
+      border-radius: 12px;
+      padding: 32px 28px;
+      box-shadow: 0 2px 16px rgba(0,0,0,.08);
+      width: 320px;
+      text-align: center;
+    }
+
+    img.captcha-image {
+      border: 1px solid #e0e0e0;
+      border-radius: 6px;
+      display: block;
+      margin: 0 auto 20px;
+      width: 200px;
+      height: 80px;
+    }
+
+    input.captcha-input {
+      font-size: 24px;
+      letter-spacing: 6px;
+      text-align: center;
+      text-transform: uppercase;
+      width: 180px;
+      padding: 8px 12px;
+      border: 2px solid #ccc;
+      border-radius: 8px;
+      outline: none;
+      transition: border-color .15s;
+    }
+    input.captcha-input:focus { border-color: #3498db; }
+
+    .btns {
+      display: flex;
+      gap: 10px;
+      justify-content: center;
+      margin-top: 18px;
+    }
+    button {
+      padding: 9px 18px;
+      border: none;
+      border-radius: 7px;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 500;
+      transition: background .15s;
+    }
+    #checkBtn { background: #3498db; color: white; }
+    #checkBtn:hover { background: #2980b9; }
+    #nextBtn  { background: #ecf0f1; color: #555; }
+    #nextBtn:hover  { background: #dde3e8; }
+
+    #feedback {
+      margin-top: 16px;
+      font-size: 15px;
+      font-weight: 600;
+      min-height: 22px;
+    }
+    #counter { font-size: 12px; color: #bbb; margin-top: 8px; }
+    #error   { font-size: 12px; color: #e74c3c; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <h1>BreakCAPTCHA</h1>
+  <p class="sub">Local test page &mdash; click <strong>Solve CAPTCHA</strong> in the extension popup</p>
+
+  <div class="card">
+    <img class="captcha-image" id="captchaImg" src="" alt="CAPTCHA" width="200" height="80">
+    <input class="captcha-input" id="captchaInput" type="text" maxlength="4"
+           placeholder="????" autocomplete="off" spellcheck="false">
+
+    <div class="btns">
+      <button id="checkBtn">Check</button>
+      <button id="nextBtn">Next</button>
+    </div>
+
+    <div id="feedback"></div>
+    <div id="counter"></div>
+    <div id="error"></div>
+  </div>
+
+  <script>
+    let captchas = [];
+    let idx = 0;
+
+    async function init() {
+      try {
+        const res = await fetch('captchas.json');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        captchas = await res.json();
+        show(0);
+      } catch (e) {
+        document.getElementById('error').textContent =
+          'captchas.json not found — run: python test_page/generate_test_captchas.py  ' +
+          'then serve with: python -m http.server 8080 --directory test_page';
+      }
+    }
+
+    function show(i) {
+      if (!captchas.length) return;
+      idx = ((i % captchas.length) + captchas.length) % captchas.length;
+      document.getElementById('captchaImg').src  = captchas[idx].file;
+      document.getElementById('captchaInput').value = '';
+      document.getElementById('feedback').textContent = '';
+      document.getElementById('counter').textContent  = `${idx + 1} / ${captchas.length}`;
+    }
+
+    document.getElementById('checkBtn').addEventListener('click', () => {
+      const answer  = document.getElementById('captchaInput').value.toUpperCase().trim();
+      const correct = captchas[idx].label;
+      const fb      = document.getElementById('feedback');
+      if (answer === correct) {
+        fb.textContent = `Correct! (${correct})`;
+        fb.style.color = '#27ae60';
+      } else {
+        fb.textContent = `Wrong — answer: ${correct}`;
+        fb.style.color = '#e74c3c';
+      }
+    });
+
+    document.getElementById('nextBtn').addEventListener('click', () => show(idx + 1));
+
+    // Also advance on Enter key in the input.
+    document.getElementById('captchaInput').addEventListener('keydown', e => {
+      if (e.key === 'Enter') document.getElementById('checkBtn').click();
+    });
+
+    init();
+  </script>
+</body>
+</html>

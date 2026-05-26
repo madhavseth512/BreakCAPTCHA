@@ -11,3 +11,5 @@ __pycache__/
 *.h5
 # Local archive of superseded runs/architecture — never pushed to the remote.
 deprecated/
+test_page/captchas/
+test_page/captchas.json
