@@ -10,6 +10,8 @@ BreakCAPTCHA targets standard 4-character alphanumeric CAPTCHAs (A–Z, 0–9). 
 
 On a held-out set of 10,000 synthetic CAPTCHAs, the model reaches **97.05% full-string accuracy** and **99.18% per-character accuracy** (see [Results](#results)).
 
+![Extension Demo](assets/Working%20Ext%20SS.png)
+
 ---
 
 ## Architecture
